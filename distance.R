@@ -24,7 +24,7 @@ createNeighbourListFromNextCell <- function () {
       
       
       j <- 1
-      #list with the distance of each Anschlussobjekt to the trafostations
+      #list with the distance of each Anschlussobjekt to the trafostation
       for (i in aggrLocationData$Anschlussobjekt) {
             
             #calculation according geosphere package
