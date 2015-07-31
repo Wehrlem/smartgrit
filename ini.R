@@ -41,7 +41,7 @@ listColNamesLocTrafo <- c('Trafo Nr' = 'integer', 'T Leistung' = 'integer', 'T L
 listCellProdIDs <- as.character(0)
 
 #required list of packages
-listReqPackages <- c('geosphere', 'sp', 'rgl', 'networkD3', 'caTools', 'igraph', 'gdistance', 'rgdal')
+listReqPackages <- c('geosphere', 'sp', 'rgl', 'networkD3', 'caTools', 'igraph', 'gdistance', 'rgdal','RMySQL')
 
 
 #load consumption profiles containing the distribution for private, business, and agriculture

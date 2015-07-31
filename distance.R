@@ -5,7 +5,6 @@
 #order andidentify list members 
 #building a grid??
 
-
 #read data sets, clear of NA or zero coordinates, merge trafostation location with Anschlussobjekt
 #outcome: list of Anschlussobjekte with
 createNeighbourListFromNextCell <- function () {
