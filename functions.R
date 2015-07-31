@@ -1,4 +1,4 @@
-#functions needed to support the basic application
+#functions needed to support the basic applicationss
 
 
 # Install function for packages    
