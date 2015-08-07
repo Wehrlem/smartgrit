@@ -1,7 +1,9 @@
+#Author: Mario Gstrein, 05.05.2015, Fribourg (CH)
 #functions needed to support the basic applicationss
 
 
-# Install function for packages    
+
+# Install function for packages - list of reuqired packages are defined in ini.R   
 checkPackages <- function(){
       
       for (packName in listReqPackages) {
@@ -18,41 +20,48 @@ checkPackages <- function(){
       }
 }
 
+#function to kill al DB connections in the connect list
+killAllDBConnects <- function() {
 
+  all_cons <- dbListConnections(MySQL())
+  
+  for(con in all_cons) dbDisconnect(con)
+  
+    dbListConnections(MySQL())
 
-#create Folder structure for tmp
-checkDir <- function(subDir) {
-      
-      
-      #setting up predefined folder struture
-      tmpDir <- getwd()
-      folders <- strsplit(subDir, "/")
-      j <- 1
-      
-      #create working directory and set it as working directory until all folders are created
-      #TODO: Still showing the warning messages that folder exist!
-      for (i in folders[[1]]) {
-            
-            tmpDir <- file.path(tmpDir, folders[[1]][j])
-            
-            if(dir.exists(tmpDir) == TRUE) {
-                  
-                  setwd(tmpDir[[1]])
-                  
-            } else {
-                  dir.create(tmpDir, showWarnings = FALSE)
-                  setwd(tmpDir[[1]])
-                  
-            }
-            
-            j <- j + 1 
-            
-      }
-      #reset the working directory
-      tmpDir <- setwd(mainDir[[1]])
-      
-      
 }
 
 
-
+#create Folder structure for tmp file storage - not required anymore
+checkDir <- function(subDir) {
+  
+  
+  #setting up predefined folder struture
+  tmpDir <- getwd()
+  folders <- strsplit(subDir, "/")
+  j <- 1
+  
+  #create working directory and set it as working directory until all folders are created
+  #TODO: Still showing the warning messages that folder exist!
+  for (i in folders[[1]]) {
+    
+    tmpDir <- file.path(tmpDir, folders[[1]][j])
+    
+    if(dir.exists(tmpDir) == TRUE) {
+      
+      setwd(tmpDir[[1]])
+      
+    } else {
+      dir.create(tmpDir, showWarnings = FALSE)
+      setwd(tmpDir[[1]])
+      
+    }
+    
+    j <- j + 1 
+    
+  }
+  #reset the working directory
+  tmpDir <- setwd(mainDir[[1]])
+  
+  
+}

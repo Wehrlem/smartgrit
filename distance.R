@@ -1,3 +1,4 @@
+#Author: Mario Gstrein, 05.05.2015, Fribourg (CH)
 #Creation of a network structure to define the next neigbhours of an Anschlussobjekt
 #It works like the longest or shortest distance of  the Latitude/Longitude point of the Anschlussobjekt to the next Trafostation
 
