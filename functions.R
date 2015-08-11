@@ -31,6 +31,24 @@ killAllDBConnects <- function() {
 
 }
 
+#checks the consumption total of choosen months to find out if the calcualtion according the SLP is correct - this is for verification purposes
+#requires dataframe: distrDataSet_C
+testSumCons <- function() {
+  
+  test <- distrDataSet_C[which(distrDataSet_C$Month == 1 | distrDataSet_C$Month == 4 | distrDataSet_C$Month == 7),]
+  
+  test2 <- setNames(aggregate(test[, c('C_MWh_Week', 'C_MWh_Saturday', 'C_MWh_Sunday')], by = list(test$Anschlussobjekt), FUN = sum), c('Anschlussobjekt', 'C_MWh_Week', 'C_MWh_Saturday', 'C_MWh_Sunday'))
+  
+  j <- 1
+  for(i in test2$Anschlussobjekt) {
+    
+    test2[j, 'Total'] <- sum(test2[j, 'C_MWh_Week'], test2[j, 'C_MWh_Saturday'], test2[j, 'C_MWh_Sunday'])
+    j <- j+1
+  }
+  return(test2)
+}
+
+
 
 #create Folder structure for tmp file storage - not required anymore
 checkDir <- function(subDir) {

@@ -1,20 +1,27 @@
 #Author: Mario Gstrein, 05.05.2015, Fribourg (CH)
 #Operation:
-#call generateAnschlussobjektTable() to provide basic dataset for distribution calculation
-#call calculatingDistribution(sqlProfileStatement, selectColumn, typDistr) to generate the distribution for consumption and production
-#call mergeDistribution() to generate one dataset with 'Anschlussobjekt', 'Time', 'Month', 'C_MWh', 'P_MWh' and store it in the DB
+# 1) call generateAnschlussobjektTable() to provide basic dataset for distribution calculation
+# 2) call calculatingDistribution(sqlProfileStatement, selectColumn, typDistr) to generate the distribution for consumption and production
+#         calculatingDistribution(sqlLoadConsProfile, c('Anschlussobjekt', 'Clustering', 'C_MWh'), 'C')
+#         calculatingDistribution(sqlLoadProdProfile, c('Anschlussobjekt', 'GEM_Nr', 'P_MWh'), 'P')
+# 3) call mergeDistribution() to generate one dataset with 'Anschlussobjekt', 'Time', 'Month', 'C_MWh', 'P_MWh' and store it in the DB
+# 4) call calculatingCellStatus to generate two columns a) a difference between production and consumption and b) the intervall value for assigning the status to the intervall
+# 5) call caluclatingCellStorage to generate the available amount of electricity to a given time-point
 
+#IMPORTANT: steps 1 to 3 should only be done, if there is a new set of raw data. It generates the basic table (content_anschlussobjekte) which requires a lot of computation time. Any further adaptation, e.g. consumption, is done afterwards or based on this data. 
 
-#TODO: 1) calculation of distribution is sequential (per month), however it only should do it when there are no entries in the DB or the distribution (sum of entries) has
-#      2) in function exitProvProd randomly production potential is assigned, however, it is done each time (should do once, if id doesn't exist in the production_potential_cell table)
+#TODO: - in function exitProvProd randomly production potential is assigned, however, it is done each time (should do once, if id doesn't exist in the production_potential_cell table)
 
 
 #the function reads the original data on Messpunkte level and generates a raw table in which each a house (=Anschlussobjekt).
 #There are not unique IDs as a house can have different profiles (H0, G0).
 #output: is a dataframe aoDataSet (columns: Anschlussobjekt, Clustering, GEM_Nr, C_MWh, P_MWh, Potential)
-# function call: 
-#calculatingDistribution(sqlLoadConsProfile, c('Anschlussobjekt', 'Clustering', 'C_MWh'), 'C')
-#calculatingDistribution(sqlLoadProdProfile, c('Anschlussobjekt', 'GEM_Nr', 'P_MWh'), 'P')
+#Anschlussobjekt Clustering GEM_Nr C_MWh P_MWh Potential
+#2     11100108498         H0    768  5228  4000    Medium
+#3     11100151173         H0    768  8902  4031   Current
+#4     11100151188         H0    768  1392 10028   Current
+#1     11100153358         G0    768 16133  3500       Bad
+#5     11100153358         H0    768  6851  3500       Bad
 generateAnschlussobjektTable <- function () {
   
     #load all Messpunkte
@@ -48,77 +55,155 @@ generateAnschlussobjektTable <- function () {
   
 }
 
-#calculation of hourly distribution for consumption and production by loading "profiles".
-#variables: sqlStatement (string of a sql statement loading of the profiles); selectColumn (vector of column names which should be choosen from aoDataSet); typDistr (P or C, refers to what type of distribution is calculated) 
+#calculation of hourly distribution for production by loading "profiles". In this case it is the daily (average) sun radiation from January to December
 #input: is the aoDataSet (columns: Anschlussobjekt, Clustering, GEM_Nr, C_MWh, P_MWh, Potential)
-#output: is a dataframe with the columns: 'Anschlussobjekt', 'Time', 'Month', 'C_MWh' (or) 'P_MWh'. The results are stored in DB "XXX"
-calculatingDistribution <- function(sqlProfileStatement, selectColumn, typDistr) {
-  
+#output: is a dataframe with the columns: 'Anschlussobjekt', 'Time', 'Month', 'P_MWh'. The results are stored in DB "XXX"
+calculatingDistrProd <- function() {
+    
+
     #load consumption or sun radiation profiles etc.
-    rs <- dbSendQuery(connectDB, sqlProfileStatement)
+    rs <- dbSendQuery(connectDB, sqlLoadProdProfile)
     profiles <- fetch(rs, n = -1)
     
-    #which column for MWh should be choosen from C_MWh, or P_MWh
-    columnNameMWh <- paste(typDistr, '_MWh', sep = '', collapse = '')
+    #selecting only columns for the consumption or production calculation 
+    tmpDataSet <- aoDataSet[c('Anschlussobjekt', 'GEM_Nr', 'P_MWh')]
     
-    #selecting only columns for the consumption calculation 
-    tmpDataSet <- aoDataSet[selectColumn]
+    #remove all double entries whichare caused by different profiles (H0, G0) as a house has only one production capacity
+    tmpDataSet <- unique(tmpDataSet)
     
     #two datasets required to merge them afterwards (only consumption or production can be calculated at once)
-    if(typDistr == 'C') distrDataSet_C <<- 0 else if(typDistr == 'P') distrDataSet_P <<- 0
-    
-    distrDataSet <- data.frame(list('Anschlussobjekt' = 'character', 'Time' = 'integer', 'Month' = 'integer', columnNameMWh = 'double'))
-    distrDataSet <- 0
+    distrDataSet_P <<- 0
+    tmpdistrDataSet <- data.frame(list('Anschlussobjekt' = 'character', 'Time' = 'integer', 'Month' = 'integer', 'P_MWh' = 'double'))
+    tmpdistrDataSet <- 0
     
     j <- 1
-    
+
     for (cellID in tmpDataSet$Anschlussobjekt) { 
+        
       
         #load profiles (matching either Clustering for consumption or GEM_Nr for production)
-        if(typDistr == 'C') tmpProfile <- profiles[which (profiles$Profile == tmpDataSet$Clustering[j]), ] else if(typDistr == 'P') tmpProfile <- profiles[which (profiles$GEM_Nr == tmpDataSet$GEM_Nr[j]), ]
-        
-        #calculating the distribution per ID according the profile (either sun radiation or consumption pattern)
-        res <- data.frame(mapply('*',tmpProfile[, 4:27], tmpDataSet[j, columnNameMWh] ))
-        
-        #create a data frame for distribution per Anschlussobjekt (hourly) and add columns
-        res[, 'Anschlussobjekt'] <- cellID
-        res[, 'Time'] <- rownames(res)
-        res[, 'Month'] <- settings['month','Value']
-        res[, columnNameMWh] <- res
-        res[, 1] <- NULL
-        
-        #create a dataframe with all consumption/production distributions
-        distrDataSet <- rbind(res, distrDataSet) 
+        tmpProfile <- profiles[which (profiles$GEM_Nr == tmpDataSet$GEM_Nr[j]), 4:15]
+
+        #loop through months
+        for (mth in 1:12) {
+          
+            #the required profile looks up  the DB where they are stored per months (columns in table)
+            res <- data.frame(mapply('*',tmpProfile[mth], tmpDataSet[j, 'P_MWh'] ))
+            
+            #create a data frame for distribution per Anschlussobjekt (hourly) and add columns
+            res[, 'Anschlussobjekt'] <- cellID
+            res[, 'Time'] <- rownames(res)
+            res[, 'Month'] <- mth
+            res[, 'P_MWh'] <- res[]
+            res[, 1] <- NULL
+            
+            #create a dataframe with all consumption/production distributions
+            tmpdistrDataSet <- rbind(res, tmpdistrDataSet) 
+            
+            
+        }
         
         j <- j + 1
     }
     
+    
     #aggregate distribution dataset so only each row represents a single Anschlussobjekt to a specific time and month. (e.g. aggregate different load profiles H0 and G0 of one ID)
-    distrDataSet <- setNames(aggregate(distrDataSet[, columnNameMWh], by = list(distrDataSet$Anschlussobjekt, distrDataSet$Time, distrDataSet$Month), FUN = sum), c('Anschlussobjekt', 'Time', 'Month', columnNameMWh))
-    distrDataSet <- subset(distrDataSet, distrDataSet$Anschlussobjekt != 0)
+    tmpdistrDataSet <- setNames(aggregate(tmpdistrDataSet[, 'P_MWh'], by = list(tmpdistrDataSet$Anschlussobjekt, tmpdistrDataSet$Time, tmpdistrDataSet$Month), FUN = sum), c('Anschlussobjekt', 'Time', 'Month', 'P_MWh'))
+    tmpdistrDataSet <- subset(tmpdistrDataSet, tmpdistrDataSet$Anschlussobjekt != 0)
     
-    if(typDistr == 'C') distrDataSet_C <<- distrDataSet else if(typDistr == 'P') distrDataSet_P <<- distrDataSet
+    distrDataSet_P <<- tmpdistrDataSet
     
+}
+
+
+#calculation of hourly distribution for consumption aaccording standard load profiles (SLP - VDEW. for week, saturday, sunday each of summer, winter, and transition period)
+#Thus, the function mutliplies the yearly consumption of an Anschlussobjekt with the SLP and asigns for each month the specific SLP (e.g. for January the winter profile)
+#input: is the aoDataSet (columns: Anschlussobjekt, Clustering, GEM_Nr, C_MWh, P_MWh, Potential)
+#output: is a dataframe with the columns: 'Anschlussobjekt', 'Time', 'Month', 'C_MWh_Week', 'C_MWh_Saturday', 'C_MWh_Sunday')
+calculatingDistrCons <- function() {
+  
+  
+  #load consumption or sun radiation profiles etc.
+  rs <- dbSendQuery(connectDB, sqlLoadConsProfile)
+  profiles <- fetch(rs, n = -1)
+  
+  #selecting only columns for the consumption or production calculation 
+  tmpDataSet <- aoDataSet[c('Anschlussobjekt', 'Clustering', 'C_MWh')]
+  
+  #two datasets required to merge them afterwards (only consumption or production can be calculated at once)
+  distrDataSet_C <<- 0 
+  tmpdistrDataSet <- data.frame(list('Anschlussobjekt' = 'character', 'Time' = 'integer', 'Month' = 'integer', 'C_MWh_Week' = 'double', 'C_MWh_Saturday' = 'double', 'C_MWh_Sunday' = 'double'))
+  tmpdistrDataSet <- 0
+  
+  rs <- dbSendQuery(connectDB, 'SELECT * FROM `month_assigned_period`' )
+  assignedPeriod <- fetch(rs, n = -1)
+  #assignedPeriod <- as.character(assignedPeriod)
+  
+  j <- 1
+  for (cellID in tmpDataSet$Anschlussobjekt) { 
+    
+    
+    #load profiles (matching either Clustering for consumption)
+    tmpProfile <- profiles[which (profiles$Profile == tmpDataSet$Clustering[j]), ]
+  
+    #calculate the consumption for summer, winter and transition phase according VDEW SLP
+    res <- data.frame(tmpProfile[1:3], mapply('*',tmpProfile[c('Week', 'Saturday', 'Sunday')], tmpDataSet[j, 'C_MWh'] ))
+    
+    #assign consumption pattern per month (see assigned periods to month, e.g. W = 1, W = 2, TP = 3)
+    for (mth in 1:12) {
+      
+      #which period (W, S, TP) is used for the consumption pattern
+      period <- assignedPeriod$Period[assignedPeriod$Month == mth]
+      period <- as.character(period)
+      
+      tmpConsMonthly <- as.data.frame(res[which(period == res['Period']),  ])
+     
+      #create a data frame for distribution per Anschlussobjekt (hourly) and add columns
+      tmpConsMonthly[, 'Anschlussobjekt'] <- cellID
+      tmpConsMonthly[, 'Month'] <- mth
+        
+      #create a dataframe with all consumption/production distributions
+      tmpdistrDataSet <- rbind(tmpConsMonthly, tmpdistrDataSet) 
+      
+      
+    }
+    j <-j+1
+  }
+  
+  #rename columns to general terms
+  names(tmpdistrDataSet)[names(tmpdistrDataSet) =="Week"] <- "C_MWh_Week"
+  names(tmpdistrDataSet)[names(tmpdistrDataSet) =="Saturday"] <- "C_MWh_Saturday"
+  names(tmpdistrDataSet)[names(tmpdistrDataSet) =="Sunday"] <- "C_MWh_Sunday"
+
+  #aggregate distribution dataset so only each row represents a single Anschlussobjekt to a specific time and month. (e.g. aggregate different load profiles H0 and G0 of one ID)
+  tmpdistrDataSet <- setNames(aggregate(tmpdistrDataSet[, c('C_MWh_Week', 'C_MWh_Saturday', 'C_MWh_Sunday')], by = list(tmpdistrDataSet$Anschlussobjekt, tmpdistrDataSet$Time, tmpdistrDataSet$Month), FUN = sum), c('Anschlussobjekt', 'Time', 'Month', 'C_MWh_Week', 'C_MWh_Saturday', 'C_MWh_Sunday'))
+  tmpdistrDataSet <- subset(tmpdistrDataSet, tmpdistrDataSet$Anschlussobjekt != 0)
+  
+  distrDataSet_C <<- tmpdistrDataSet
+  
 }
 
 
 
 
-#merges the datasets 'distrDataSet_C' and 'distrDataSet_C' to generate one dataset with 'Anschlussobjekt', 'Time', 'Month', 'C_MWh', 'P_MWh' and store it in the DB
+
+#merges the datasets 'tmpdistrDataSet_C' and 'tmpdistrDataSet_C' to generate one dataset with 'Anschlussobjekt', 'Time', 'Month', 'C_MWh_Week', 'C_MWh_Saturday', 'C_MWh_Sunday' 'P_MWh' and store it in the DB
 mergeDistribution <- function () {
   
-    totalDistrDataSet <<- data.frame(merge(distrDataSet_C, distrDataSet_P , by = c('Anschlussobjekt', 'Time', 'Month')), stringsAsFactors=FALSE)
-    totalDistrDataSet <<- totalDistrDataSet[order(totalDistrDataSet$Anschlussobjekt, as.numeric(totalDistrDataSet$Time), as.numeric(totalDistrDataSet$Month)),]
+    totaldistrDataSet <<- data.frame(merge(distrDataSet_C, distrDataSet_P , by = c('Anschlussobjekt', 'Time', 'Month')), stringsAsFactors=FALSE)
+    totaldistrDataSet <<- totaldistrDataSet[order(totaldistrDataSet$Anschlussobjekt, as.numeric(totaldistrDataSet$Month), as.numeric(totaldistrDataSet$Time)),]
     
-    #building the INSERT statement out of the totalDistrDataSet
-    insertStatementBeg <- 'INSERT INTO `content_anschlussobjekte` (`Anschlussobjekt`, `Time`, `Month`, `C_MWh`, `P_MWh`) VALUES'
+    #create different tables for different days (week, Sunday, Sturday)
+    
+    #building the INSERT statement out of the totaldistrDataSet
+    insertStatementBeg <- 'INSERT INTO `content_anschlussobjekte` (`Anschlussobjekt`, `Time`, `Month`, `C_MWh_Week`, `C_MWh_Saturday`, `C_MWh_Sunday`, `P_MWh`) VALUES'
     
     valueInsertRow <- ''
   
     j <- 1
-    for (i in totalDistrDataSet$Anschlussobjekt) {
+    for (i in totaldistrDataSet$Anschlussobjekt) {
       
-        sqlCheckEntry <- paste('SELECT count(*) FROM `content_anschlussobjekte` WHERE `Anschlussobjekt` = ', totalDistrDataSet[j, 'Anschlussobjekt'] ,' AND  `Time` = ', totalDistrDataSet[j, 'Time'],' AND `Month` = ', totalDistrDataSet[j, 'Month'], sep = '', collapse = NULL)
+        sqlCheckEntry <- paste('SELECT count(*) FROM `content_anschlussobjekte` WHERE `Anschlussobjekt` = ', totaldistrDataSet[j, 'Anschlussobjekt'] ,' AND  `Time` = ', totaldistrDataSet[j, 'Time'],' AND `Month` = ', totaldistrDataSet[j, 'Month'], sep = '', collapse = NULL)
         
         #checks if the entry already exists in the database
         rs <- dbSendQuery(connectDB, sqlCheckEntry)
@@ -127,16 +212,17 @@ mergeDistribution <- function () {
         #first update entries if they exist or insert them
         if(entryExists > 0) {
           
-            sqlUpdateEntry <- paste('UPDATE `content_anschlussobjekte` SET C_MWh = ', totalDistrDataSet[j, 'C_MWh'], ', P_MWh = ', totalDistrDataSet[j, 'P_MWh'] ,' WHERE `Anschlussobjekt` = ', totalDistrDataSet[j, 'Anschlussobjekt'] ,' AND  `Time` = ', totalDistrDataSet[j, 'Time'],' AND `Month` = ', totalDistrDataSet[j, 'Month'], sep = '', collapse = NULL)
+            sqlUpdateEntry <- paste('UPDATE `content_anschlussobjekte` SET `C_MWh_Week` = ', totaldistrDataSet[j, 'C_MWh_Week'], ', `C_MWh_Saturday` = ', totaldistrDataSet[j, 'C_MWh_Saturday'], ', `C_MWh_Sunday` = ', totaldistrDataSet[j, 'C_MWh_Sunday'], ', `P_MWh` = ', totaldistrDataSet[j, 'P_MWh'] ,' WHERE `Anschlussobjekt` = ', totaldistrDataSet[j, 'Anschlussobjekt'] ,' AND  `Time` = ', totaldistrDataSet[j, 'Time'],' AND `Month` = ', totaldistrDataSet[j, 'Month'], sep = '', collapse = NULL)
+            #print(sqlUpdateEntry)
             dbSendQuery(connectDB, sqlUpdateEntry)
             
         } else {
         
             #create value for each row in the dataframe
-            valueInsertRow <- paste( valueInsertRow, '(', totalDistrDataSet[j, 'Anschlussobjekt'], ',', totalDistrDataSet[j, 'Time'], ',', totalDistrDataSet[j, 'Month'], ',', totalDistrDataSet[j, 'C_MWh'], ',', totalDistrDataSet[j, 'P_MWh'], ')', sep = '', collapse = NULL)
+            valueInsertRow <- paste( valueInsertRow, '(', totaldistrDataSet[j, 'Anschlussobjekt'], ',', totaldistrDataSet[j, 'Time'], ',', totaldistrDataSet[j, 'Month'], ',', totaldistrDataSet[j, 'C_MWh_Week'], ',', totaldistrDataSet[j, 'C_MWh_Saturday'], ',', totaldistrDataSet[j, 'C_MWh_Sunday'], ',', totaldistrDataSet[j, 'P_MWh'], ')', sep = '', collapse = NULL)
 
             #adding a , between the values except for the last one
-            if(length(totalDistrDataSet$Anschlussobjekt) > j) valueInsertRow <- paste(valueInsertRow, ', ', sep = '', collapse = NULL)
+            if(length(totaldistrDataSet$Anschlussobjekt) > j) valueInsertRow <- paste(valueInsertRow, ', ', sep = '', collapse = NULL)
           
         }
         
@@ -159,73 +245,56 @@ mergeDistribution <- function () {
 #the intervall is calculated from the max production and max consumption divided by the number of steps (settings). The step size is divided afterwards with the consumption and production of a specific time point
 calculatingCellStatus <- function() {
   
-  #get min and max per Anschlussobjekt and calculating
+  #get min and max of the table
   rs <- dbSendQuery(connectDB, sqlMaxConsCell)
   maxCons <- fetch(rs, n = -1)
+  maxCons <- as.numeric(maxCons)
   rs <- dbSendQuery(connectDB, sqlMaxProdCell)
   maxProd <- fetch(rs, n = -1)
+  maxProd <- as.numeric(maxProd)
+  rs <- dbSendQuery(connectDB, sqlLoadIntervallSteps)
+  intervSteps <- fetch(rs, n = -1)
+  intervSteps <- as.numeric(intervSteps)
   
-  #select difference and assign
-  rs <- dbSendQuery(connectDB, sqlCalDiffProdConsCell)
-  diffPvCDataSet <- fetch(rs, n = -1)
+  #looks up if the range size for the status has changed
+  calcRanges(maxProd, maxCons, intervSteps)
   
-  
-  tmpStatus <- apply(diffPvCDataSet['Total_P_C'], 2, function(x) diffPvCDataSet$Total_P_C/as.numeric(settings['rangeStatusSize', 'Value'] ))
-  
-  diffPvCDataSet <- merge(diffPvCDataSet, tmpStatus, by=0, all=TRUE) 
-  
-  #rename columns to general terms
-  names(diffPvCDataSet)[names(diffPvCDataSet) =="Total_P_C.x"] <- "Total_P_C"
-  names(diffPvCDataSet)[names(diffPvCDataSet) =="Total_P_C.y"] <- "Status"
-  
-  #update DB
-  j <- 1
-  for (i in diffPvCDataSet$Anschlussobjekt) {
-    
-    sqlUpdateEntry <- paste('UPDATE `content_anschlussobjekte` SET Total_P_C = ', diffPvCDataSet[j, 'Total_P_C'], ', Status = ', diffPvCDataSet[j, 'Status'] ,' WHERE `Anschlussobjekt` = ', diffPvCDataSet[j, 'Anschlussobjekt'] ,' AND  `Time` = ', diffPvCDataSet[j, 'Time'],' AND `Month` = ', diffPvCDataSet[j, 'Month'], sep = '', collapse = NULL)
-    dbSendQuery(connectDB, sqlUpdateEntry)
-      
-    
-    j <- j + 1
-    
-  }
-  
-  
-  #update settings if maxP and maxC changed
-  if(as.numeric(settings['maxP', 'Value']) != maxProd || as.numeric(settings['maxC', 'Value']) != maxCons)  {
-    
-    sqlUpdateMaxC <- paste('UPDATE `settings` SET `Value` = ', maxCons, ' WHERE `Variable` = "maxC"', sep = '', collapse = NULL)
-    sqlUpdateMaxP <- paste('UPDATE `settings` SET `Value` = ', maxProd, ' WHERE `Variable` = "maxP"', sep = '', collapse = NULL)
-    dbSendQuery(connectDB, c(sqlUpdateMaxP, sqlUpdateMaxC))
-    calcRanges()
-    
+  #calculating the intervall level of a sepcific time point 
+  #TODO: Ask if this is okay over the entire table
+  dbSendQuery(connectDB, paste('UPDATE `content_anschlussobjekte` SET `Status` = `Diff_P_C` / ', as.numeric(settings['intervallSize', 'Value']), sep = '', collapse = ''))
 
-  }
-  
-  
-  
-
+ 
 }
 
 
 #calculates range size according the max values in C_MWh and P_MWh
-calcRanges <- function() {
+calcRanges <- function(maxProd, maxCons, intervSteps) {
   
-  maxP <- round(as.numeric(settings['maxP','Value']), digits = 0)
-  maxC <- round(as.numeric(settings['maxC','Value']), digits = 0)
-  rangeSteps <- as.numeric(settings['rangeCellStatus','Value'])
-  tmpP <- as.numeric(0) 
-  
-  #calculate the range size
-  res <- (maxP + maxC) / rangeSteps
-  
-  sqlUpdateRanges <- paste('UPDATE `settings` SET `Value` = ', res, ' WHERE `Variable` = "rangeStatusSize"', sep = '', collapse = NULL)
-  dbSendQuery(connectDB, sqlUpdateRanges)
-  
-  #refresh settings
-  rs <- dbSendQuery(connectDB, 'SELECT * FROM `settings` WHERE 1')
-  settings <<- fetch(rs, n = -1)
-  rownames(settings) <<- settings[,'Variable']
+    if(as.numeric(settings['maxP', 'Value']) != maxProd || as.numeric(settings['maxC', 'Value']) != maxCons || as.numeric(settings['intervallSteps', 'Value']) != intervSteps)  {
+    
+        maxP <- round(as.numeric(settings['maxP','Value']), digits = 0)
+        maxC <- round(as.numeric(settings['maxC','Value']), digits = 0)
+        tmpP <- as.numeric(0) 
+        
+        
+        #calculate the range size
+        res <- (maxP + maxC) / intervSteps
+        
+        #update settings
+        sqlUpdateRanges <- paste('UPDATE `settings` SET `Value` = ', res, ' WHERE `Variable` = ', paste0("'", 'intervallSize', "'"), sep = '', collapse = '')
+        sqlUpdateMaxC <- paste('UPDATE `settings` SET `Value` = ', maxCons, ' WHERE `Variable` = ', paste0("'", 'maxC', "'"), sep = '', collapse = '')
+        sqlUpdateMaxP <- paste('UPDATE `settings` SET `Value` = ', maxProd, ' WHERE `Variable` = ', paste0("'", 'maxP', "'"), sep = '', collapse = '')
+
+        dbSendQuery(connectDB, sqlUpdateMaxP)
+        dbSendQuery(connectDB, sqlUpdateMaxC)
+        dbSendQuery(connectDB, sqlUpdateRanges)
+        
+        #refresh settings
+        rs <- dbSendQuery(connectDB, 'SELECT * FROM `settings` WHERE 1')
+        settings <<- fetch(rs, n = -1)
+        rownames(settings) <<- settings[,'Variable']
+    
+    }
 }
 
 
@@ -248,6 +317,7 @@ reclusteringCell <- function() {
     }
     
 }
+
 
 
 
@@ -312,7 +382,7 @@ assignProvisoryPV <- function() {
     #save results in DB (Potential per Anschlussobjekt)
     listProvProd <- unique(aoDataSet[, c('Anschlussobjekt', 'Potential')], incomparables = FALSE)
     
-    #building the INSERT statement out of the totalDistrDataSet
+    #building the INSERT statement out of the totaldistrDataSet
     insertStatementBeg <- 'INSERT INTO `production_potential_per_cell` (`Anschlussobjekt`, `Potential`) VALUES'
     
     valueInsertRow <- ''
@@ -357,3 +427,40 @@ assignProvisoryPV <- function() {
 }
 
 
+test <- function() {
+  
+  #select difference from table
+  rs <- dbSendQuery(connectDB, sqlCalDiffProdConsCell)
+  diffPvCDataSet <- fetch(rs, n = -1)
+  
+  #calculating the cell status (according the number of intervalls)
+  tmpStatus <- apply(diffPvCDataSet['Total_P_C'], 2, function(x) diffPvCDataSet$Total_P_C/as.numeric(settings['rangeStatusSize', 'Value'] ))
+  
+  diffPvCDataSet <- merge(diffPvCDataSet, tmpStatus, by=0, all=TRUE) 
+  
+  #rename columns to general terms
+  names(diffPvCDataSet)[names(diffPvCDataSet) =="Total_P_C.x"] <- "Total_P_C"
+  names(diffPvCDataSet)[names(diffPvCDataSet) =="Total_P_C.y"] <- "Status"
+  
+  #update DB
+  j <- 1
+  for (i in diffPvCDataSet$Anschlussobjekt) {
+    
+    sqlUpdateEntry <- paste('UPDATE `content_anschlussobjekte` SET Total_P_C = ', diffPvCDataSet[j, 'Total_P_C'], ', Status = ', diffPvCDataSet[j, 'Status'] ,' WHERE `Anschlussobjekt` = ', diffPvCDataSet[j, 'Anschlussobjekt'] ,' AND  `Time` = ', diffPvCDataSet[j, 'Time'],' AND `Month` = ', diffPvCDataSet[j, 'Month'], sep = '', collapse = NULL)
+    dbSendQuery(connectDB, sqlUpdateEntry)
+    
+    
+    j <- j + 1
+    
+  }
+  
+  
+  
+}
+
+checkSumDistr <- function() {
+  rs <- dbSendQuery(connectDB, sqlCheckSumDistr)
+  res <- fetch(rs, n = -1)
+  
+  return(res)
+}
