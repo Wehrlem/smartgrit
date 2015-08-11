@@ -1,11 +1,9 @@
 #Author: Mario Gstrein, 05.05.2015, Fribourg (CH)
 #Operation:
 # 1) call generateAnschlussobjektTable() to provide basic dataset for distribution calculation
-# 2) call calculatingDistribution(sqlProfileStatement, selectColumn, typDistr) to generate the distribution for consumption and production
-#         calculatingDistribution(sqlLoadConsProfile, c('Anschlussobjekt', 'Clustering', 'C_MWh'), 'C')
-#         calculatingDistribution(sqlLoadProdProfile, c('Anschlussobjekt', 'GEM_Nr', 'P_MWh'), 'P')
-# 3) call mergeDistribution() to generate one dataset with 'Anschlussobjekt', 'Time', 'Month', 'C_MWh', 'P_MWh' and store it in the DB
-# 4) call calculatingCellStatus to generate two columns a) a difference between production and consumption and b) the intervall value for assigning the status to the intervall
+# 2) call calculatingDistribution() to generate the distribution for consumption and production (the consumption is generated for Week, Saturday and Sunday)
+# 3) call mergeDistribution() to generate one dataset with 'Anschlussobjekt', 'Time', 'Month', 'C_MWh_Week', 'C_MWh_Saturday', 'C_MWh_Sunday', 'P_MWh' and store it in the DB
+# 4) call calculatingCellStatus to generate two columns in the DB a) a difference between production and consumption and b) the intervall value for assigning the status to the intervall
 # 5) call caluclatingCellStorage to generate the available amount of electricity to a given time-point
 
 #IMPORTANT: steps 1 to 3 should only be done, if there is a new set of raw data. It generates the basic table (content_anschlussobjekte) which requires a lot of computation time. Any further adaptation, e.g. consumption, is done afterwards or based on this data. 
@@ -135,7 +133,7 @@ calculatingDistrCons <- function() {
   tmpdistrDataSet <- data.frame(list('Anschlussobjekt' = 'character', 'Time' = 'integer', 'Month' = 'integer', 'C_MWh_Week' = 'double', 'C_MWh_Saturday' = 'double', 'C_MWh_Sunday' = 'double'))
   tmpdistrDataSet <- 0
   
-  rs <- dbSendQuery(connectDB, 'SELECT * FROM `month_assigned_period`' )
+  rs <- dbSendQuery(connectDB, sqlLoadAssignedMonth)
   assignedPeriod <- fetch(rs, n = -1)
   #assignedPeriod <- as.character(assignedPeriod)
   
@@ -182,8 +180,6 @@ calculatingDistrCons <- function() {
   distrDataSet_C <<- tmpdistrDataSet
   
 }
-
-
 
 
 
@@ -261,33 +257,40 @@ calculatingCellStatus <- function() {
   
   #calculating the intervall level of a sepcific time point 
   #TODO: Ask if this is okay over the entire table
-  dbSendQuery(connectDB, paste('UPDATE `content_anschlussobjekte` SET `Status` = `Diff_P_C` / ', as.numeric(settings['intervallSize', 'Value']), sep = '', collapse = ''))
+  #dbSendQuery(connectDB, paste('UPDATE `content_anschlussobjekte` SET `Status` = `Diff_P_C` / ', as.numeric(settings['intervallSize', 'Value']), sep = '', collapse = ''))
 
- 
+
 }
 
 
 #calculates range size according the max values in C_MWh and P_MWh
 calcRanges <- function(maxProd, maxCons, intervSteps) {
   
-    if(as.numeric(settings['maxP', 'Value']) != maxProd || as.numeric(settings['maxC', 'Value']) != maxCons || as.numeric(settings['intervallSteps', 'Value']) != intervSteps)  {
+    if(as.numeric(settings['maxP', 'Value']) != maxProd || sum(as.numeric(settings[c('maxC_Week', 'maxC_Saturday', 'maxC_Sunday'), 'Value'])) != sum(maxCons) || as.numeric(settings['intervallSteps', 'Value']) != intervSteps)  {
     
         maxP <- round(as.numeric(settings['maxP','Value']), digits = 0)
-        maxC <- round(as.numeric(settings['maxC','Value']), digits = 0)
-        tmpP <- as.numeric(0) 
         
+        j <- 1
+        for(maxDay in c('maxC_Week', 'maxC_Saturday', 'maxC_Sunday' )) {
+          
+          maxC <- round(as.numeric(settings[maxDay,'Value']), digits = 0)
+          #calculate the range size
+          res <- (maxP + maxC) / intervSteps
         
-        #calculate the range size
-        res <- (maxP + maxC) / intervSteps
+          #update settings
+          sqlUpdateRanges <- paste('UPDATE `settings` SET `Value` = ', res, ' WHERE `Variable` = ', paste0("'intervallSize", substr(maxDay, 5, nchar(maxDay)), "'"), sep = '', collapse = '')
+          sqlUpdateMaxC <- paste('UPDATE `settings` SET `Value` = ', maxCons[j], ' WHERE `Variable` = ', paste0("'", maxDay, "'; "), sep = '', collapse = '')
+          dbSendQuery(connectDB, sqlUpdateRanges)
+          dbSendQuery(connectDB, sqlUpdateMaxC)
+          
+          j <- j + 1 
+          
+        }
         
-        #update settings
-        sqlUpdateRanges <- paste('UPDATE `settings` SET `Value` = ', res, ' WHERE `Variable` = ', paste0("'", 'intervallSize', "'"), sep = '', collapse = '')
-        sqlUpdateMaxC <- paste('UPDATE `settings` SET `Value` = ', maxCons, ' WHERE `Variable` = ', paste0("'", 'maxC', "'"), sep = '', collapse = '')
+        #update max production
         sqlUpdateMaxP <- paste('UPDATE `settings` SET `Value` = ', maxProd, ' WHERE `Variable` = ', paste0("'", 'maxP', "'"), sep = '', collapse = '')
-
         dbSendQuery(connectDB, sqlUpdateMaxP)
-        dbSendQuery(connectDB, sqlUpdateMaxC)
-        dbSendQuery(connectDB, sqlUpdateRanges)
+
         
         #refresh settings
         rs <- dbSendQuery(connectDB, 'SELECT * FROM `settings` WHERE 1')
@@ -326,7 +329,6 @@ existProdOfCell <- function() {
   
     aoDataSet[,'P_MWh'] <<- as.integer(0)
     
-    
     q <- 1
     for (elementList in aoDataSet$Tarif) {
     
@@ -343,7 +345,7 @@ existProdOfCell <- function() {
     #saving all Anschlussobjekte IDs for later reference
     listCellProdIDs <<- subset(aoDataSet, aoDataSet$P_MWh > 0)
     
-    aoDataSet$MWh_2013[aoDataSet$Tarif %in% as.list(listTarifsProd$Tarif)] <<- as.integer(0)
+    aoDataSet$C_MWh[aoDataSet$Tarif %in% as.list(listTarifsProd$Tarif)] <<- as.integer(0)
     aoDataSet <<- subset(aoDataSet, select=-Tarif)
     
 }
