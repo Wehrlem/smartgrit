@@ -27,7 +27,7 @@ generateAnschlussobjektTable <- function () {
     rawData <- fetch(rs, n = -1)
     
     #remove all NA (Verbrauch) and tarifs which should not be considered in the calculations
-    rawData <- na.omit(rawData)
+    #rawData <- na.omit(rawData)
     
     #storing in global variable
     aoDataSet <<- rawData
@@ -42,13 +42,14 @@ generateAnschlussobjektTable <- function () {
     #add columns "P_MWh" and "Potential" of PV to state if the ID produces currently electricity or not
     existProdOfCell()
     
+    aoDataSet$Potential[is.na(aoDataSet$Potential)] <<- 'N'
     #Aggregating all "Messpunkte" of a house to an Anschlussobjekt (house) level - Still multiple entries possible if a house includes households and business as well as has a production  
-    aoDataSet <<- setNames(aggregate(aoDataSet[, c('C_MWh', 'P_MWh')], by = list(aoDataSet$Anschlussobjekt, aoDataSet$Clustering, aoDataSet$GEM_Nr), FUN = sum), c('Anschlussobjekt', 'Clustering', 'GEM_Nr', 'C_MWh', 'P_MWh'))
+    aoDataSet <<- setNames(aggregate(aoDataSet[, c('C_MWh', 'P_MWh')], by = list(aoDataSet$Anschlussobjekt, aoDataSet$Clustering, aoDataSet$GEM_Nr, aoDataSet$Potential), FUN = sum), c('Anschlussobjekt', 'Clustering', 'GEM_Nr', 'Potential', 'C_MWh', 'P_MWh'))
     
     aoDataSet <<- aoDataSet[order(aoDataSet$Anschlussobjekt),]
     
     #assign MWh according the "Potential" column to Anschlussobjekte without a production
-    assignProvisoryPV()
+    assignProduction()
   
   
 }
@@ -87,6 +88,7 @@ calculatingDistrProd <- function() {
           
             #the required profile looks up  the DB where they are stored per months (columns in table)
             res <- data.frame(mapply('*',tmpProfile[mth], tmpDataSet[j, 'P_MWh'] ))
+            res <- round(res, 4)
             
             #create a data frame for distribution per Anschlussobjekt (hourly) and add columns
             res[, 'Anschlussobjekt'] <- cellID
@@ -145,7 +147,7 @@ calculatingDistrCons <- function() {
     tmpProfile <- profiles[which (profiles$Profile == tmpDataSet$Clustering[j]), ]
   
     #calculate the consumption for summer, winter and transition phase according VDEW SLP
-    res <- data.frame(tmpProfile[1:3], mapply('*',tmpProfile[c('Week', 'Saturday', 'Sunday')], tmpDataSet[j, 'C_MWh'] ))
+    res <- data.frame(tmpProfile[1:3], round(mapply('*',tmpProfile[c('Week', 'Saturday', 'Sunday')], tmpDataSet[j, 'C_MWh']), 4))
     
     #assign consumption pattern per month (see assigned periods to month, e.g. W = 1, W = 2, TP = 3)
     for (mth in 1:12) {
@@ -192,7 +194,7 @@ mergeDistribution <- function () {
     #create different tables for different days (week, Sunday, Sturday)
     
     #building the INSERT statement out of the totaldistrDataSet
-    insertStatementBeg <- 'INSERT INTO `content_anschlussobjekte` (`Anschlussobjekt`, `Time`, `Month`, `C_MWh_Week`, `C_MWh_Saturday`, `C_MWh_Sunday`, `P_MWh`) VALUES'
+    insertStatementBeg <- 'INSERT INTO `content_anschlussobjekte` (`Anschlussobjekt`, `Time`, `Month`, `C_MWh_Week`, `C_MWh_Saturday`, `C_MWh_Sunday`, `P_MWh`) VALUES '
     
     valueInsertRow <- ''
   
@@ -218,7 +220,7 @@ mergeDistribution <- function () {
             valueInsertRow <- paste( valueInsertRow, '(', totaldistrDataSet[j, 'Anschlussobjekt'], ',', totaldistrDataSet[j, 'Time'], ',', totaldistrDataSet[j, 'Month'], ',', totaldistrDataSet[j, 'C_MWh_Week'], ',', totaldistrDataSet[j, 'C_MWh_Saturday'], ',', totaldistrDataSet[j, 'C_MWh_Sunday'], ',', totaldistrDataSet[j, 'P_MWh'], ')', sep = '', collapse = NULL)
 
             #adding a , between the values except for the last one
-            if(length(totaldistrDataSet$Anschlussobjekt) > j) valueInsertRow <- paste(valueInsertRow, ', ', sep = '', collapse = NULL)
+            #if(length(totaldistrDataSet$Anschlussobjekt) > j) valueInsertRow <- paste(valueInsertRow, ', ', sep = '', collapse = NULL)
           
         }
         
@@ -226,11 +228,10 @@ mergeDistribution <- function () {
     
     }
     
-    
+    valueInsertRow <- substr(valueInsertRow,1,nchar(valueInsertRow)-2)
     #Finalize the insert statement and send query (insert only executed if there are values to be insert otherwise query is not executed)
     insertStatement <- paste(insertStatementBeg, valueInsertRow, sep = '', collapse = '')
-    #insertStatement <- substr(insertStatement,1,nchar(insertStatement)-1)
-
+    
     if (insertStatement != insertStatementBeg) dbSendQuery(connectDB, insertStatement) 
     
     
@@ -240,6 +241,25 @@ mergeDistribution <- function () {
 #calculating the status of a cell by comparing an intervall with the production and consumption at a given time point
 #the intervall is calculated from the max production and max consumption divided by the number of steps (settings). The step size is divided afterwards with the consumption and production of a specific time point
 calculatingCellStatus <- function() {
+  
+  #update the difference between prodcution and consumption per hour
+  dbSendQuery(connectDB, sqlCalDiffProdConsCell)
+  
+  #looks up if the range size for the status has changed
+  calcRanges()
+  
+  for (h in c('Week', 'Saturday', 'Sunday')) {
+    #calculating the intervall level of a sepcific time point 
+    #TODO: Ask if this is okay over the entire table
+    sqlUpdateQuery <- paste('UPDATE `content_anschlussobjekte` SET `Status_', h, '` = ROUND(`Diff_P_C_', h, '` / ', as.numeric(settings[paste('intervallSize_', h, sep = '', collapse = ''), 'Value']), ', 4)', sep = '', collapse = '')
+    dbSendQuery(connectDB, sqlUpdateQuery)
+  }
+
+}
+
+#TodO: Question is: shoudl there be only one max of prod and cons for all cells or just for each Trafostation (this would require an extra table with anschlussobjekte and max vaues - remove from the settings - calc with the update query)
+#calculates range size according the max values in C_MWh and P_MWh
+calcRanges <- function(maxProd, maxCons, intervSteps) {
   
   #get min and max of the table
   rs <- dbSendQuery(connectDB, sqlMaxConsCell)
@@ -252,21 +272,7 @@ calculatingCellStatus <- function() {
   intervSteps <- fetch(rs, n = -1)
   intervSteps <- as.numeric(intervSteps)
   
-  #looks up if the range size for the status has changed
-  calcRanges(maxProd, maxCons, intervSteps)
-  
-  #calculating the intervall level of a sepcific time point 
-  #TODO: Ask if this is okay over the entire table
-  #dbSendQuery(connectDB, paste('UPDATE `content_anschlussobjekte` SET `Status` = `Diff_P_C` / ', as.numeric(settings['intervallSize', 'Value']), sep = '', collapse = ''))
-
-
-}
-
-
-#calculates range size according the max values in C_MWh and P_MWh
-calcRanges <- function(maxProd, maxCons, intervSteps) {
-  
-    if(as.numeric(settings['maxP', 'Value']) != maxProd || sum(as.numeric(settings[c('maxC_Week', 'maxC_Saturday', 'maxC_Sunday'), 'Value'])) != sum(maxCons) || as.numeric(settings['intervallSteps', 'Value']) != intervSteps)  {
+    #if(as.numeric(settings['maxP', 'Value']) != maxProd || sum(as.numeric(settings[c('maxC_Week', 'maxC_Saturday', 'maxC_Sunday'), 'Value'])) != sum(maxCons) || as.numeric(settings['intervallSteps', 'Value']) != intervSteps)  {
     
         maxP <- round(as.numeric(settings['maxP','Value']), digits = 0)
         
@@ -297,7 +303,7 @@ calcRanges <- function(maxProd, maxCons, intervSteps) {
         settings <<- fetch(rs, n = -1)
         rownames(settings) <<- settings[,'Variable']
     
-    }
+    #}
 }
 
 
@@ -342,9 +348,6 @@ existProdOfCell <- function() {
         
     }
     
-    #saving all Anschlussobjekte IDs for later reference
-    listCellProdIDs <<- subset(aoDataSet, aoDataSet$P_MWh > 0)
-    
     aoDataSet$C_MWh[aoDataSet$Tarif %in% as.list(listTarifsProd$Tarif)] <<- as.integer(0)
     aoDataSet <<- subset(aoDataSet, select=-Tarif)
     
@@ -353,112 +356,64 @@ existProdOfCell <- function() {
 
 #assign production status either current MWh with "Current" or the potential (currently "Good", "Medium", and "Bad" - see listProvisoryProd)
 #ToDo:  potential of production assign according geodata
-assignProvisoryPV <- function() {
-
-    #get a list with Anschlussobjekte without a production
-    listCellConsIDs <<- subset(aoDataSet, aoDataSet$P_MWh == 0)
-    
-    #assign "current" value to all active production units
-    for (j in listCellProdIDs$Anschlussobjekt) {
-      
-        #assign "current" status to current/active PV production
-        aoDataSet$Potential[j == aoDataSet$Anschlussobjekt] <<- 'Current'
-      
-      
-    }
-    
-    
-    #assign randomly potential PV production to all non-current production according the column "Potential"
-    for (k in unique(listCellConsIDs$Anschlussobjekt)) {
-      
-        #assignment of (randomly generated) PV potential to Anschlussobjekte without production
-        aoDataSet$Potential[aoDataSet$Anschlussobjekt == k] <<- sample(rownames(listProvisoryProd), 1, replace = TRUE)
-      
-    }
-    
-    #assign MWh according the potential PV production
-    aoDataSet$P_MWh[aoDataSet$Potential == 'Good'] <<- listProvisoryProd['Good', 'MWh']
-    aoDataSet$P_MWh[aoDataSet$Potential == 'Medium'] <<- listProvisoryProd['Medium', 'MWh']
-    aoDataSet$P_MWh[aoDataSet$Potential == 'Bad'] <<- listProvisoryProd['Bad', 'MWh']
-    
-    #save results in DB (Potential per Anschlussobjekt)
-    listProvProd <- unique(aoDataSet[, c('Anschlussobjekt', 'Potential')], incomparables = FALSE)
-    
-    #building the INSERT statement out of the totaldistrDataSet
-    insertStatementBeg <- 'INSERT INTO `production_potential_per_cell` (`Anschlussobjekt`, `Potential`) VALUES'
-    
-    valueInsertRow <- ''
-    
-    j <- 1
-    for (i in listProvProd$Anschlussobjekt) {
-      
-      sqlCheckEntry <- paste('SELECT count(*) FROM `production_potential_per_cell` WHERE `Anschlussobjekt` = ', listProvProd[j, 'Anschlussobjekt'], sep = '', collapse = NULL) 
-      #checks if the entry already exists in the database
-      rs <- dbSendQuery(connectDB, sqlCheckEntry)
-      entryExists <- fetch(rs, n = -1)
-
-      #first update entries if they exist or insert them
-      if(entryExists > 0) {
-        
-        sqlUpdateEntry <- paste('UPDATE `production_potential_per_cell` SET Potential = ', paste0("'", listProvProd[j, 'Potential'], "'"), ' WHERE `Anschlussobjekt` = ', listProvProd[j, 'Anschlussobjekt'], sep = '', collapse = NULL)
-        dbSendQuery(connectDB, sqlUpdateEntry)
-        
-      } else {
-        
-        #create value for each row in the dataframe
-        valueInsertRow <- paste( valueInsertRow, '(', listProvProd[j, 'Anschlussobjekt'], ',', paste0("'", listProvProd[j, 'Potential'], "'"), ')', sep = '', collapse = NULL)
-        
-        #adding a , between the values except for the last one
-        if(length(listProvProd$Anschlussobjekt) > j) valueInsertRow <- paste(valueInsertRow, ', ', sep = '', collapse = NULL)
-        
-      }
-      
-      j <- j + 1
-      
-    }
-    
-    
-    #Finalize the insert statement and send query (insert only executed if there are values to be insert otherwise query is not executed)
-    insertStatement <- paste(insertStatementBeg, valueInsertRow, sep = '', collapse = '')
-    #insertStatement <- substr(insertStatement,1,nchar(insertStatement)-2)
-
-    if (insertStatement != insertStatementBeg) dbSendQuery(connectDB, insertStatement) 
-    
-    
+assignProduction <- function() {
   
-}
-
-
-test <- function() {
+  #get a list of non-assigned Anschlussobjekte without a production
+  listCellConsIDs <<- unique(subset(aoDataSet$Anschlussobjekt, aoDataSet$P_MWh == 0 & aoDataSet$Potential == 'N') )
   
-  #select difference from table
-  rs <- dbSendQuery(connectDB, sqlCalDiffProdConsCell)
-  diffPvCDataSet <- fetch(rs, n = -1)
+  #saving of non-assigned Anschlussobjekte with production
+  listCellProdIDs <<- unique(subset(aoDataSet$Anschlussobjekt, aoDataSet$P_MWh > 0 & aoDataSet$Potential == 'N'))
   
-  #calculating the cell status (according the number of intervalls)
-  tmpStatus <- apply(diffPvCDataSet['Total_P_C'], 2, function(x) diffPvCDataSet$Total_P_C/as.numeric(settings['rangeStatusSize', 'Value'] ))
+  #building the INSERT statement out of the totaldistrDataSet
+  insertStatementBeg <- 'INSERT INTO `production_potential_per_cell` (`Anschlussobjekt`, `Potential`) VALUES '
   
-  diffPvCDataSet <- merge(diffPvCDataSet, tmpStatus, by=0, all=TRUE) 
+  valueInsertRowProd <- ''
+  valueInsertRowCons <- ''
   
-  #rename columns to general terms
-  names(diffPvCDataSet)[names(diffPvCDataSet) =="Total_P_C.x"] <- "Total_P_C"
-  names(diffPvCDataSet)[names(diffPvCDataSet) =="Total_P_C.y"] <- "Status"
   
-  #update DB
-  j <- 1
-  for (i in diffPvCDataSet$Anschlussobjekt) {
+  #assign "current" value to all active production units
+  for (j in listCellProdIDs) {
     
-    sqlUpdateEntry <- paste('UPDATE `content_anschlussobjekte` SET Total_P_C = ', diffPvCDataSet[j, 'Total_P_C'], ', Status = ', diffPvCDataSet[j, 'Status'] ,' WHERE `Anschlussobjekt` = ', diffPvCDataSet[j, 'Anschlussobjekt'] ,' AND  `Time` = ', diffPvCDataSet[j, 'Time'],' AND `Month` = ', diffPvCDataSet[j, 'Month'], sep = '', collapse = NULL)
-    dbSendQuery(connectDB, sqlUpdateEntry)
+    #assign "current" status to current/active PV production
+    aoDataSet$Potential[j == aoDataSet$Anschlussobjekt] <<- 'Current'
+    
+    #create insert statement for all production which are not in the DB
+    valueInsertRowProd <- paste( valueInsertRowProd, '(', j , ',', paste0("'", aoDataSet$Potential[j == aoDataSet$Anschlussobjekt], "'"), '), ', sep = '', collapse = NULL)
     
     
-    j <- j + 1
+  }
+  
+  #assign randomly potential PV production to all non-current production according the column "Potential"
+  for (k in unique(listCellConsIDs)) {
+    
+    #assignment of (randomly generated) PV potential to Anschlussobjekte without production
+    aoDataSet$Potential[aoDataSet$Anschlussobjekt == k] <<- sample(rownames(listProvisoryProd), 1, replace = TRUE)
     
   }
   
   
+  #assign MWh according the potential PV production
+  aoDataSet$P_MWh[aoDataSet$Potential == 'Good'] <<- listProvisoryProd['Good', 'MWh']
+  aoDataSet$P_MWh[aoDataSet$Potential == 'Medium'] <<- listProvisoryProd['Medium', 'MWh']
+  aoDataSet$P_MWh[aoDataSet$Potential == 'Bad'] <<- listProvisoryProd['Bad', 'MWh']
+  
+  #create Insert statement for the list with already assigned production potentials
+  for (i in listCellConsIDs) {
+    
+    valueInsertRowCons <- paste(valueInsertRowCons, '(', i, ',', paste0("'", unique(aoDataSet$Potential[i == aoDataSet$Anschlussobjekt]), "'"), '), ', sep = '', collapse = NULL)
+
+    
+  }
+  
+  valueInsertRowCons <- substr(valueInsertRowCons,1,nchar(valueInsertRowCons)-2)
+  
+  #Finalize the insert statement and send query (insert only executed if there are values to be insert otherwise query is not executed)
+  insertStatement <- paste(insertStatementBeg, valueInsertRowProd, valueInsertRowCons, sep = '', collapse = '')
+  if (insertStatement != insertStatementBeg) dbSendQuery(connectDB, insertStatement)
   
 }
+
+
 
 checkSumDistr <- function() {
   rs <- dbSendQuery(connectDB, sqlCheckSumDistr)
